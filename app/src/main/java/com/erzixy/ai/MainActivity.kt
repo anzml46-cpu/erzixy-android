@@ -55,9 +55,21 @@ data class ChatAttachment(
     val base64: String
 )
 
+data class GeneratedFile(
+    val filename: String,
+    val mimeType: String,
+    val base64: String
+)
+
+data class ErzixyResponse(
+    val reply: String,
+    val files: List<GeneratedFile>
+)
+
 data class ChatMessage(
     val text: String,
-    val isUser: Boolean
+    val isUser: Boolean,
+    val files: List<GeneratedFile> = emptyList()
 )
 
 class MainActivity : ComponentActivity() {
@@ -120,7 +132,7 @@ private suspend fun loadAttachment(
 private suspend fun askErzixy(
     message: String,
     attachment: ChatAttachment?
-): String = withContext(Dispatchers.IO) {
+): ErzixyResponse = withContext(Dispatchers.IO) {
 
     val connection =
         URL(API_URL).openConnection() as HttpURLConnection
@@ -172,7 +184,37 @@ private suspend fun askErzixy(
             )
         }
 
-        json.optString("reply", "AI belum memberikan jawaban.")
+        val generatedFiles = mutableListOf<GeneratedFile>()
+        val fileArray = json.optJSONArray("files")
+
+        if (fileArray != null) {
+            for (i in 0 until fileArray.length()) {
+                val file = fileArray.optJSONObject(i) ?: continue
+                val filename = file.optString("filename")
+                val data = file.optString("data")
+
+                if (filename.isNotBlank() && data.isNotBlank()) {
+                    generatedFiles.add(
+                        GeneratedFile(
+                            filename = filename,
+                            mimeType = file.optString(
+                                "mimeType",
+                                "application/octet-stream"
+                            ),
+                            base64 = data
+                        )
+                    )
+                }
+            }
+        }
+
+        ErzixyResponse(
+            reply = json.optString(
+                "reply",
+                "AI belum memberikan jawaban."
+            ),
+            files = generatedFiles
+        )
 
     } finally {
         connection.disconnect()
@@ -195,6 +237,33 @@ fun ErzixyApp() {
 
     val messages = remember {
         mutableStateListOf<ChatMessage>()
+    }
+
+    var pendingFile by remember {
+        mutableStateOf<GeneratedFile?>(null)
+    }
+
+    val downloadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        val file = pendingFile
+        if (uri != null && file != null) {
+            try {
+                val bytes = Base64.decode(file.base64, Base64.DEFAULT)
+                context.contentResolver.openOutputStream(uri)?.use {
+                    it.write(bytes)
+                } ?: throw Exception("Tidak bisa membuka lokasi penyimpanan")
+
+                messages.add(
+                    ChatMessage("File berhasil disimpan: ${file.filename}", false)
+                )
+            } catch (e: Exception) {
+                messages.add(
+                    ChatMessage("Gagal menyimpan file: ${e.message}", false)
+                )
+            }
+        }
+        pendingFile = null
     }
 
     fun pickFile(uri: Uri?) {
@@ -254,7 +323,13 @@ fun ErzixyApp() {
         scope.launch {
             try {
                 val answer = askErzixy(question, file)
-                messages.add(ChatMessage(answer, false))
+                messages.add(
+                    ChatMessage(
+                        answer.reply,
+                        false,
+                        answer.files
+                    )
+                )
             } catch (e: Exception) {
                 messages.add(
                     ChatMessage(
@@ -405,6 +480,40 @@ fun ErzixyApp() {
                                                 fontSize = 14.sp,
                                                 lineHeight = 21.sp
                                             )
+                                        }
+
+                                        item.files.forEach { generatedFile ->
+                                            Row(
+                                                Modifier.fillMaxWidth().padding(top = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.InsertDriveFile,
+                                                    contentDescription = null,
+                                                    tint = Blue
+                                                )
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    generatedFile.filename,
+                                                    modifier = Modifier.weight(1f),
+                                                    color = Ink,
+                                                    fontSize = 12.sp
+                                                )
+                                                TextButton(
+                                                    onClick = {
+                                                        pendingFile = generatedFile
+                                                        downloadLauncher.launch(
+                                                            generatedFile.filename
+                                                        )
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Download,
+                                                        contentDescription = null
+                                                    )
+                                                    Text("Download")
+                                                }
+                                            }
                                         }
 
                                         if (!item.isUser) {
